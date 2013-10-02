@@ -18,6 +18,8 @@ def configuration(parent_package='', top_path=None):
     config.add_subpackage('svm')
     config.add_subpackage('datasets')
     config.add_subpackage('datasets/tests')
+    config.add_subpackage('elm')
+    config.add_subpackage('elm/tests')
     config.add_subpackage('feature_extraction')
     config.add_subpackage('feature_extraction/tests')
     config.add_subpackage('cluster')
