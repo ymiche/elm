@@ -21,6 +21,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.preprocessing import LabelBinarizer
 from ..utils.validation import check_arrays
 
+from . import helpers
 
 __all__ = ["elm"]
 
@@ -73,8 +74,19 @@ class elm(BaseEstimator, RegressorMixin):
     """
 
     def __init__(self, problem='r', n_neurons=100, activation_function=np.tanh):
+        if not problem in ['r','c']:
+            raise ValueError('Unknown type of problem. See help.')
         self.problem = problem
+        if not isinstance(n_neurons, int):
+            raise ValueError('Given number of neurons is not an integer. See \
+                    help.')
+        if not n_neurons > 0:
+            raise ValueError('Given number of neurons should be strictly \
+                    positive. See help.')
         self.n_neurons=n_neurons
+        if not isinstance(activation_function, np.ufunc):
+            raise ValueError('Given activation function is not a function. See \
+                    help.')
         self.activation_function = activation_function
 
 
@@ -118,7 +130,7 @@ class elm(BaseEstimator, RegressorMixin):
         _yWasOneDimensional = False
         if len(y.shape) == 1:
             _yWasOneDimensional = True
-            y = y.reshape((n_samples, 1))
+            y = y.reshape((self.n_samples, 1))
 
         self.n_outputs = y.shape[1]
 
@@ -146,13 +158,13 @@ class elm(BaseEstimator, RegressorMixin):
         
         if self.problem == 'c':
             _y = y.copy()
-            y, mapping = self._oneInAllMapping(y)
+            y, mapping = helpers.oneInAllMapping(y)
             # Setting them to -1 and 1 instead of 0 and 1
             y = y*2-1
 
         betas, residues, rank, s = np.linalg.lstsq(self.hiddenLayer, y)
         yh = np.dot(self.hiddenLayer, betas)
-        yloo, errloo = self._leave_one_out(self.hiddenLayer, y, betas)
+        yloo, errloo = helpers.leaveOneOut(self.hiddenLayer, y, betas)
         
         # Set the output weights 
         self.outputWeights = betas
@@ -163,13 +175,13 @@ class elm(BaseEstimator, RegressorMixin):
             yh = np.zeros(yh.shape)
             for i, index in enumerate(indices):
                 yh[i, index] = 1
-            yh = self._oneInAllDemapping(yh, mapping)
+            yh = helpers.oneInAllDemapping(yh, mapping)
 
             indices = np.argmax(yloo, axis=1)
             yloo = np.zeros(yloo.shape)
             for i, index in enumerate(indices):
                 yloo[i, index] = 1
-            yloo = self._oneInAllDemapping(yloo, mapping)
+            yloo = helpers.oneInAllDemapping(yloo, mapping)
 
         if _yWasOneDimensional:
             # Case where the given output was 1-D, return in the same format
@@ -178,120 +190,6 @@ class elm(BaseEstimator, RegressorMixin):
 
         return self, yh, yloo
     
-
-    def _leave_one_out(x, y, w):
-        """Performs the PRESS Leave One Out calculation, from D. Allen's formula.
-        This algorithm evaluates the LOO output of a linear system (exact
-        value, not an estimation). This only works for a linear system between
-        x and y.
-
-        The algorithm expects the system to be properly conditioned, i.e.
-        numpy.linalg.cond(x) < 10^14 (personal arbitrary limit).
-
-        Parameters
-        ----------
-        x : array-like, shape = [n_samples, n_features]
-            The input of the linear system for which to calculate the LOO
-            output
-
-        y : array-like, shape = [n_samples, n_outputs]
-            The output of the linear system to solve
-
-        w : array-like, shape = [n_features, n_outputs]
-            The solution of the system xw=y, computed by numpy.linalg.lstsq
-            typically
-
-        Returns
-        -------
-        yloo : array-like, shape = [n_samples, n_outputs]
-               The Leave-One-Out output of the system
-        
-        errloo : double
-                 The Mean Square Error between the real output and the LOO one
-
-        Reference
-        ---------
-        David M. Allen. The relationship between variable selection and data
-        augmentation and a method for prediction. Technometrics, 16(1):125–127,
-        February 1974.
-        """
-        # Optimizations likely possible :)
-        C = np.dot(x.T, x)
-        P = np.dot(x, np.linalg.inv(C))
-        proxyDiagMatrix = np.diag(np.dot(P, x.T))
-        S = y-np.dot(x, w)
-        S = S/(1 - proxyDiagMatrix)
-        errloo = np.mean(np.power(S, 2))
-        yloo = y - S;
-       
-        return yloo, errloo
-
-    
-    def _oneInAllMapping(y):
-        """Create a One in All code for classification vector.
-        Only works for single-output multi-class classification.
-
-        Parameters
-        ----------
-        y : array-like, shape = [n_samples, 1]
-            The vector of classes to encode
-
-        Returns
-        -------
-        b : array-like, shape = [n_samples, <number of classes in y>]
-            The matrix of the mapped values to a one in all code
-
-        mapping : array-like, shape = [<number of classes>, <number of classes in y>+1]
-                  The matrix used to map the values of the classes to the codes
-
-
-        """
-        if len(y.shape) == 1:
-            raise ValueError('The shape of the output vector must be 2-D.')
-        if y.shape[1] != 1:
-            raise ValueError('Classification output vector cannot be \
-                    multi-output.')
-        
-        # Extract all the possible unique classes from the given vector 
-        classes, indices = np.unique(y, return_inverse=True)
-        
-        b = np.zeros((y.shape[0], len(classes)))
-        mapping = np.zeros((len(classes), len(classes)+1))
-
-        for i, theClass in enumerate(classes):
-            # Code 1 in zeros for this one
-            b[indices==i, i] = 1
-            # Update the corresponding mapping
-            mapping[i, i+1] = 1
-            mapping[i, 0] = theClass
-
-        return b, mapping
-
-    def _oneInAllDemapping(b, mapping):
-        """Demaps the representation done by the oneInAllMapping function
-        using the provided mapping.
-
-        Parameters
-        ----------
-        b : array-like, shape = [n_samples, <number of classes>]
-            The matrix of the mapped values, this is a binary matrix
-
-        mapping: array-like, shape = [<number of classes>, <number of classes>+1]
-                 The matrix used to map the values of the classes to the codes
-
-        Returns
-        -------
-        y : array-like, shape = [n_samples, 1]
-            The decoded vector of classes
-        """
-        classes = mapping[:,0]
-
-        y = np.zeros((b.shape[0], 1))
-
-        for i, theClass in enumerate(classes):
-            y[b[:, i] == 1, 0] = theClass
-
-        return y
 
     def predict(self, x):
         """This function does prediction on an array of test vectors x.
@@ -308,3 +206,5 @@ class elm(BaseEstimator, RegressorMixin):
         """
         
         return y_pred
+
+
