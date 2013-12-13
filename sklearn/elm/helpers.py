@@ -58,7 +58,9 @@ def leaveOneOut(x, y, w):
         n_outputs = y.shape[1]
 
     C = np.dot(x.T, x)
-    P = np.dot(x, np.linalg.inv(C))
+    # Using the pseudo-inverse of numpy, as it is more stable than the direct
+    # inverse (SVD based)
+    P = np.dot(x, np.linalg.pinv(C))
     proxyDiagMatrix = np.diag(np.dot(P, x.T))
     S = y-np.dot(x, w)
     S = S/(1 - np.tile(proxyDiagMatrix.reshape((n_samples, 1)), n_outputs))

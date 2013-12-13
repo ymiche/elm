@@ -18,8 +18,8 @@ import scipy.sparse as sp
 from sklearn.utils import as_float_array
 from sklearn.utils.extmath import safe_sparse_dot
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
-from sklearn.preprocessing import LabelBinarizer
-from ..utils.validation import check_arrays
+from sklearn.preprocessing import LabelBinarizer, LabelEncoder
+from ..utils.validation import check_arrays, array2d
 
 from . import helpers
 
@@ -52,6 +52,8 @@ class elm(BaseEstimator, RegressorMixin):
     Notes
     -----
     This version automatically adds linear neurons to the ELM.
+    This version does not support multi-label (aka multi-output multi-class)
+    classification
     
     Attributes
     ----------
@@ -88,6 +90,7 @@ class elm(BaseEstimator, RegressorMixin):
             raise ValueError('Given activation function is not a function. See \
                     help.')
         self.activation_function = activation_function
+        self.trained = False
 
 
     def fit(self, x, y):
@@ -133,23 +136,27 @@ class elm(BaseEstimator, RegressorMixin):
             y = y.reshape((self.n_samples, 1))
 
         self.n_outputs = y.shape[1]
-
+        
+        if (self.problem == 'c' and self.n_outputs > 1):
+            raise ValueError('The ELM does not support multi-label (multi-class\
+                    multi-output) classification. Please convert your problem\
+                    to another type.')
 
         # Generate random input weights
         self.inputWeights = np.random.randn(self.n_neurons, x.shape[1])*np.sqrt(3)
         # Generate random input biases
         self.inputBiases = np.random.randn(self.n_neurons, 1)*0.5
         # Project the input data
-        self.hiddenLayer = np.dot(x, self.inputWeights.T)
+        hiddenLayer = np.dot(x, self.inputWeights.T)
         # Add the biases
-        self.hiddenLayer += np.tile(self.inputBiases, (1, self.hiddenLayer.shape[0])).T
+        hiddenLayer += np.tile(self.inputBiases, (1, hiddenLayer.shape[0])).T
         # Non-linearity in the neurons (tanh function)
-        self.hiddenLayer = self.activation_function(self.hiddenLayer)
+        hiddenLayer = self.activation_function(hiddenLayer)
         # Add linear neurons to the total
-        self.hiddenLayer = np.hstack((self.hiddenLayer, x))
+        hiddenLayer = np.hstack((hiddenLayer, x))
     
         # Check the hidden layer condition number before running this
-        if np.linalg.cond(x) > 10**14:
+        if np.linalg.cond(x) > 10**12:
             # TODO Give a better message for this, and point to methods that do
             # help
             raise ValueError('Hidden Layer is ill-conditioned. Consider \
@@ -157,31 +164,40 @@ class elm(BaseEstimator, RegressorMixin):
                     reduction/selection.')
         
         if self.problem == 'c':
-            _y = y.copy()
-            y, mapping = helpers.oneInAllMapping(y)
-            # Setting them to -1 and 1 instead of 0 and 1
-            y = y*2-1
+            # The classes encoding functions do not like 2-D arrays
+            y = y.ravel()
+            self.labelBinarizer = LabelBinarizer(neg_label=-1, pos_label=1)
+            self.labelBinarizer.fit(y)
+            y = self.labelBinarizer.transform(y)
 
-        betas, residues, rank, s = np.linalg.lstsq(self.hiddenLayer, y)
-        yh = np.dot(self.hiddenLayer, betas)
-        yloo, errloo = helpers.leaveOneOut(self.hiddenLayer, y, betas)
+        self.outputWeights, residues, rank, s = np.linalg.lstsq(hiddenLayer, y)
+        yh = np.dot(hiddenLayer, self.outputWeights)
+        yloo, errloo = helpers.leaveOneOut(hiddenLayer, y, self.outputWeights)
         
-        # Set the output weights 
-        self.outputWeights = betas
         self.trained = True
        
         if self.problem == 'c':
-            indices = np.argmax(yh, axis=1)
-            yh = np.zeros(yh.shape)
-            for i, index in enumerate(indices):
-                yh[i, index] = 1
-            yh = helpers.oneInAllDemapping(yh, mapping)
+            # The binary classification case is a bit differently handled
+            # as the binarizer/encoder generate a 1-D representation, then
+            if len(self.labelBinarizer.classes_) == 2:
+                yh = np.sign(yh)
+            else:
+                indices = np.argmax(yh, axis=1)
+                # We only need the indices of the neurons that fire the highest,
+                # not their values, for classification
+                yh = np.zeros(yh.shape)
+                for i, index in enumerate(indices):
+                    yh[i, index] = 1
+            yh = self.labelBinarizer.inverse_transform(yh.ravel())
 
-            indices = np.argmax(yloo, axis=1)
-            yloo = np.zeros(yloo.shape)
-            for i, index in enumerate(indices):
-                yloo[i, index] = 1
-            yloo = helpers.oneInAllDemapping(yloo, mapping)
+            if len(self.labelBinarizer.classes_) == 2:
+                yloo = np.sign(yloo)
+            else:
+                indices = np.argmax(yloo, axis=1)
+                yloo = np.zeros(yloo.shape)
+                for i, index in enumerate(indices):
+                    yloo[i, index] = 1
+            yloo = self.labelBinarizer.inverse_transform(yloo)
 
         if _yWasOneDimensional:
             # Case where the given output was 1-D, return in the same format
@@ -194,17 +210,43 @@ class elm(BaseEstimator, RegressorMixin):
     def predict(self, x):
         """This function does prediction on an array of test vectors x.
 
-        The predicted value for each sample in X is returned.
+        The predicted value for each sample in x is returned.
 
         Parameters
         ----------
-        x : array-like, shape = [n_samples, n_features]
+        x : array-like, dense, shape = [n_samples, n_features]
 
         Returns
         -------
-        c : array, shape = [n_samples]
+        y : array-like, dense, shape = [n_samples, n_outputs]
         """
+        if not self.trained:
+            raise ValueError('The model has not been trained on the data. See\
+                    help.')
+        x = array2d(x)
+        # Project the input data
+        hiddenLayer = np.dot(x, self.inputWeights.T)
+        # Add the biases
+        hiddenLayer += np.tile(self.inputBiases, (1, hiddenLayer.shape[0])).T
+        # Non-linearity in the neurons (tanh function)
+        hiddenLayer = self.activation_function(hiddenLayer)
+        # Add linear neurons to the total
+        hiddenLayer = np.hstack((hiddenLayer, x))
         
+        y_pred = np.dot(hiddenLayer, self.outputWeights)
+        
+        if self.problem == 'c':
+            if len(self.labelBinarizer.classes_) == 2:
+                y_pred = np.sign(y_pred)
+            else:
+                indices = np.argmax(y_pred, axis=1)
+                # We only need the indices of the neurons that fire the highest,
+                # not their values, for classification
+                y_pred = np.zeros(y_pred.shape)
+                for i, index in enumerate(indices):
+                    y_pred[i, index] = 1
+            y_pred = self.labelBinarizer.inverse_transform(y_pred.ravel())
+
         return y_pred
 
 
